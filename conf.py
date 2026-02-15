@@ -479,11 +479,11 @@ async def send_documents_collected_survey(client_id: int) -> None:
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text="✅ Так, зібрав(ла) всі документи",
+            text="✅ Так, все зібрано",
             callback_data=f"docs_survey:yes:{client_id}"
         )],
         [InlineKeyboardButton(
-            text="🔄 Ні, мені потрібна ще допомога",
+            text="📋 Ні, потрібна допомога",
             callback_data=f"docs_survey:no:{client_id}"
         )]
     ])
@@ -694,24 +694,35 @@ async def get_event_statistics(event_id: int) -> Dict[str, Any]:
 
 async def build_types_overview_text(cli: Dict[str, Any]) -> str:
     """Построение обзорного текста по типам событий"""
-    text = (
-        "✅ Ви успішно зареєстровані для отримання запрошень на конференції.\n"
-        "Ви отримуватимете запрошення на найближчі заходи.\n\n"
-        "Доступні типи конференцій:\n"
-    )
     rows = await get_eventtypes_active()
     if not rows:
-        return text + "На даний момент немає активних типів конференцій."
+        return "📋 Ваш прогрес конференцій:\n\nНа даний момент немає активних типів конференцій."
+
+    num_emojis = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣"}
+    client_id = cli['client_id']
 
     lines = []
+    done_count = 0
     for rt in rows:
         tcode = rt.get("type_code")
         title = str(rt.get("title"))
-        attended = await client_has_attended_type(cli['client_id'], tcode)
-        flag = "✅ Відвідано" if attended else "⭕️ Ще не відвідували"
-        lines.append(f"• {title} — {flag}")
+        num = num_emojis.get(tcode, "▪️")
+        attended = await client_has_attended_type(client_id, tcode)
 
-    return text + "\n".join(lines)
+        if attended:
+            flag = "✅"
+            done_count += 1
+        else:
+            flag = "❌"
+        lines.append(f"{num} {title} — {flag}")
+
+    total = len(rows)
+    text = (
+        "📋 Ваш прогрес конференцій:\n\n"
+        + "\n".join(lines)
+        + f"\n\n━━━━━━━━━━━━━━━\n✅ Пройдено: {done_count} з {total}"
+    )
+    return text
 
 async def get_client_statistics(client_id: int) -> Dict[str, Any]:
     """Получение статистики клиента"""
@@ -1358,8 +1369,8 @@ def kb_admin_main() -> InlineKeyboardMarkup:
 def kb_rsvp(event_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Так, буду", callback_data=f"rsvp:{event_id}:going"),
-            InlineKeyboardButton(text="🚫 Не зможу", callback_data=f"rsvp:{event_id}:declined"),
+            InlineKeyboardButton(text="✅ Буду", callback_data=f"rsvp:{event_id}:going"),
+            InlineKeyboardButton(text="❌ Не зможу", callback_data=f"rsvp:{event_id}:declined"),
         ]
     ])
 
@@ -1591,6 +1602,7 @@ async def reg_wait_phone(m: Message, state: FSMContext):
     cli = await upsert_client(m.from_user.id, data["full_name"], phone)
     await state.clear()
     await send_welcome_and_types_list(m, cli)
+    await send_pending_invites_to_new_client(cli)
 
 @dp.message(F.text == "📋 Мої конференції")
 async def show_my_conferences(m: Message):
@@ -2425,7 +2437,7 @@ async def handle_post_event_survey(q: CallbackQuery):
     if action == "yes":
         # Клиент был на конференции - отмечаем посещение
         await mark_attendance(event_id, client_id, True)
-        await q.message.edit_text("Дякуємо! ✅")
+        await q.message.edit_text("Дякуємо за участь! 🎉\n\nОчікуйте запит на оцінку конференції.")
         await log_action("post_event_survey_response", client_id=client_id, event_id=event_id, details="attended=yes")
 
         # Отправляем опрос с оценкой
@@ -2433,11 +2445,11 @@ async def handle_post_event_survey(q: CallbackQuery):
         if tg_id:
             text = f"Будь ласка, оцініть конференцію «{event['title']}»:"
             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="⭐️1", callback_data=f"fb:{event_id}:{client_id}:1"),
-                InlineKeyboardButton(text="⭐️2", callback_data=f"fb:{event_id}:{client_id}:2"),
-                InlineKeyboardButton(text="⭐️3", callback_data=f"fb:{event_id}:{client_id}:3"),
-                InlineKeyboardButton(text="⭐️4", callback_data=f"fb:{event_id}:{client_id}:4"),
-                InlineKeyboardButton(text="⭐️5", callback_data=f"fb:{event_id}:{client_id}:5"),
+                InlineKeyboardButton(text="1 ⭐", callback_data=f"fb:{event_id}:{client_id}:1"),
+                InlineKeyboardButton(text="2 ⭐", callback_data=f"fb:{event_id}:{client_id}:2"),
+                InlineKeyboardButton(text="3 ⭐", callback_data=f"fb:{event_id}:{client_id}:3"),
+                InlineKeyboardButton(text="4 ⭐", callback_data=f"fb:{event_id}:{client_id}:4"),
+                InlineKeyboardButton(text="5 ⭐", callback_data=f"fb:{event_id}:{client_id}:5"),
             ]])
             try:
                 await bot.send_message(chat_id=int(tg_id), text=text, reply_markup=kb)
@@ -2777,6 +2789,135 @@ async def send_initial_invites_for_event(event: Dict[str, Any]):
             skip_reasons["other_error"] = skip_reasons.get("other_error", 0) + 1
 
     await log_action("invite_process_complete", event_id=event_id, details=f"Sent={sent_count}, Skipped={skip_reasons}")
+
+
+async def send_pending_invites_to_new_client(cli: Dict[str, Any]):
+    """Рассылка приглашений на предстоящие конференции для нового/только что зарегистрированного клиента.
+
+    Когда клиент регистрируется после создания события,
+    он должен получить приглашения на актуальные конференции.
+    Для каждого типа конференции выбирается самое раннее предстоящее событие.
+    Применяются те же правила eligibility, что и в send_initial_invites_for_event.
+    """
+    cid = cli.get("client_id")
+    tg_id = cli.get("tg_user_id")
+
+    if not cid or not tg_id:
+        return
+
+    now = now_kyiv()
+
+    # Получаем самое раннее предстоящее событие каждого типа
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT DISTINCT ON (type) *
+               FROM events
+               WHERE start_at >= $1
+               ORDER BY type, start_at""",
+            now
+        )
+
+    if not rows:
+        return
+
+    await log_action("new_client_invite_start", client_id=cid,
+                     details=f"Checking {len(rows)} event types")
+
+    sent_count = 0
+
+    for row in rows:
+        event = dict(row)
+        event_id = event.get("event_id")
+        type_code = event.get("type")
+        dt = event_start_dt(event)
+
+        if not dt:
+            continue
+
+        # Проверка: уже посещал (пропускаем для type_code 4 — они могут посещать многократно)
+        if type_code != 4:
+            if await client_has_attended_type(cid, type_code):
+                await log_action("invite_skip", client_id=cid, event_id=event_id,
+                                details="new_client: already_attended")
+                continue
+
+        if await client_has_active_invite_for_type(cid, type_code):
+            await log_action("invite_skip", client_id=cid, event_id=event_id,
+                            details="new_client: has_active_invite")
+            continue
+
+        # type_code 4 — только для тех, кто посетил type_code 1
+        if type_code == 4:
+            if not await client_has_attended_type(cid, 1):
+                await log_action("invite_skip", client_id=cid, event_id=event_id,
+                                details="new_client: type4_requires_type1")
+                continue
+            if cli.get('documents_collected'):
+                await log_action("invite_skip", client_id=cid, event_id=event_id,
+                                details="new_client: documents_collected")
+                continue
+
+        # Лимит подтверждений в день
+        confirmed_today = await count_client_confirmed_today_by_type(cid, type_code)
+        if type_code == 1:
+            if confirmed_today >= 1:
+                await log_action("invite_skip", client_id=cid, event_id=event_id,
+                                details="new_client: type1_daily_limit")
+                continue
+        else:
+            if confirmed_today >= 2:
+                await log_action("invite_skip", client_id=cid, event_id=event_id,
+                                details="new_client: daily_limit")
+                continue
+
+        # Проверка пересечения времени
+        if await client_has_confirmed_event_at_time(cid, dt, event.get("duration_min", 60)):
+            await log_action("invite_skip", client_id=cid, event_id=event_id,
+                            details="new_client: time_conflict")
+            continue
+
+        if await has_log("invite_sent", cid, event_id):
+            await log_action("invite_skip", client_id=cid, event_id=event_id,
+                            details="new_client: already_sent")
+            continue
+
+        # Конвертируем start_at для форматирования (если ещё datetime)
+        if isinstance(event.get('start_at'), datetime):
+            event['start_at'] = iso_dt(event['start_at'])
+
+        body = (await messages_get("invite.body")).format(
+            name=cli.get("full_name", "Клієнт"),
+            title=event["title"],
+            date=fmt_date(dt),
+            time=fmt_time(dt),
+            description=event["description"]
+        )
+
+        try:
+            title_msg = await messages_get("invite.title")
+            await bot.send_message(chat_id=int(tg_id), text=title_msg.format(title=event["title"]))
+            await bot.send_message(chat_id=int(tg_id), text=body, reply_markup=kb_rsvp(event_id))
+            await rsvp_upsert(event_id, cid, rsvp="")
+            await log_action("invite_sent", client_id=cid, event_id=event_id,
+                            details="new_client_registration")
+            sent_count += 1
+        except TelegramRetryAfter as e:
+            await log_action("invite_immediate_error", client_id=cid, event_id=event_id,
+                            details=f"new_client: RetryAfter {e.retry_after}s")
+        except TelegramForbiddenError:
+            await log_action("invite_immediate_error", client_id=cid, event_id=event_id,
+                            details="new_client: ForbiddenError")
+        except TelegramBadRequest as e:
+            await log_action("invite_immediate_error", client_id=cid, event_id=event_id,
+                            details=f"new_client: BadRequest: {str(e)}")
+        except Exception as e:
+            await log_action("invite_immediate_error", client_id=cid, event_id=event_id,
+                            details=f"new_client: {type(e).__name__}: {str(e)}")
+
+    if sent_count > 0:
+        await log_action("new_client_invite_complete", client_id=cid,
+                        details=f"Sent={sent_count}")
+
 
 # =================== NEW HANDLERS: /info, BROADCAST, MOTIVATIONAL ==============
 
@@ -3303,9 +3444,9 @@ async def scheduler_tick():
                             f"Чи вдалося вам приєднатися?"
                         )
                         kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="✅ Так, я був(ла) присутній(я)",
+                            [InlineKeyboardButton(text="✅ Так, був(ла)",
                                                 callback_data=f"post_survey:yes:{e['event_id']}:{cid}")],
-                            [InlineKeyboardButton(text="❌ Ні, не зміг(ла) приєднатися",
+                            [InlineKeyboardButton(text="❌ Ні, не зміг(ла)",
                                                 callback_data=f"post_survey:no:{e['event_id']}:{cid}")]
                         ])
                         try:
