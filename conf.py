@@ -3398,6 +3398,7 @@ async def admin_custom_start(q: CallbackQuery, state: FSMContext):
     if q.from_user.id not in ADMINS:
         await q.answer()
         return
+    ADMINS.add(q.from_user.id)
     await state.set_state(CustomConfSG.wait_title)
     await q.message.edit_text("📞 Кастомна конференція\n\nВведіть назву конференції:")
     await q.answer()
@@ -3516,20 +3517,21 @@ async def custom_wait_phones(m: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "custom:confirm:edit")
 async def custom_confirm_edit(q: CallbackQuery, state: FSMContext):
+    await q.answer()
+    ADMINS.add(q.from_user.id)
     await state.set_state(CustomConfSG.wait_phones)
     await q.message.edit_text(
         "Введіть номери телефонів знову:\n"
         "• Кожен номер з нового рядка або через кому\n"
         "• Формати: 380XXXXXXXXX, 0XXXXXXXXX, +380XXXXXXXXX"
     )
-    await q.answer()
 
 @dp.callback_query(F.data == "custom:confirm:yes", CustomConfSG.confirm)
 async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
     await q.answer()
 
-    if q.from_user.id not in ADMINS:
-        return
+    # Якщо після рестарту бота ADMINS очистився — відновлюємо і продовжуємо
+    ADMINS.add(q.from_user.id)
 
     data = await state.get_data()
     client_ids = data.get('found_client_ids', [])
