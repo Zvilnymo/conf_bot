@@ -3526,22 +3526,31 @@ async def custom_confirm_edit(q: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "custom:confirm:yes", CustomConfSG.confirm)
 async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
+    await q.answer()
+
     if q.from_user.id not in ADMINS:
-        await q.answer()
         return
 
     data = await state.get_data()
     client_ids = data.get('found_client_ids', [])
 
-    event = await create_event(
-        type_code=0,
-        title=data['title'],
-        description=data['description'],
-        start_at=data['start_at'],
-        duration_min=int(data['duration_min']),
-        link=data['link'],
-        created_by=q.from_user.id,
-    )
+    try:
+        event = await create_event(
+            type_code=0,
+            title=data['title'],
+            description=data['description'],
+            start_at=data['start_at'],
+            duration_min=int(data['duration_min']),
+            link=data['link'],
+            created_by=q.from_user.id,
+        )
+    except Exception as e:
+        await q.message.edit_text(
+            f"❌ Помилка створення події: {e}\n\nСпробуйте ще раз.",
+            reply_markup=kb_admin_main()
+        )
+        await state.clear()
+        return
 
     clients = []
     for cid in client_ids:
@@ -3550,7 +3559,17 @@ async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
             clients.append(cli)
 
     await q.message.edit_text(f"⏳ Надсилаю запрошення {len(clients)} клієнтам...")
-    result = await send_custom_invites(event, clients)
+
+    try:
+        result = await send_custom_invites(event, clients)
+    except Exception as e:
+        await q.message.edit_text(
+            f"❌ Помилка розсилки: {e}",
+            reply_markup=kb_admin_main()
+        )
+        await state.clear()
+        return
+
     await state.clear()
 
     report = (
@@ -3562,7 +3581,6 @@ async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
         f"❌ Помилка доставки: {result['failed']}"
     )
     await q.message.edit_text(report, reply_markup=kb_admin_main())
-    await q.answer()
 
 
 # =============================== SCHEDULER TICK ================================
