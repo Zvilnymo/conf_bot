@@ -1360,6 +1360,7 @@ async def get_motivational_statistics(days: int = 30) -> Dict[str, Any]:
 def kb_admin_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Додати конференцію", callback_data="admin:add")],
+        [InlineKeyboardButton(text="📞 Кастомна конференція", callback_data="admin:custom")],
         [InlineKeyboardButton(text="📋 Список конференцій", callback_data="admin:list:0")],
         [InlineKeyboardButton(text="👥 Клієнти", callback_data="admin:clients:menu")],
         [InlineKeyboardButton(text="📢 Розсилка", callback_data="broadcast:menu")],
@@ -1505,6 +1506,13 @@ def kb_motivational_test_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔙 Назад", callback_data="motivational:menu")],
     ])
 
+def kb_custom_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Надіслати", callback_data="custom:confirm:yes")],
+        [InlineKeyboardButton(text="✏️ Змінити номери", callback_data="custom:confirm:edit")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="admin:home")],
+    ])
+
 # ============================== STATE / MEMORY =================================
 
 ADMINS: set[int] = set()
@@ -1534,6 +1542,15 @@ class BroadcastSG(StatesGroup):
 class MotivationalEditSG(StatesGroup):
     wait_text = State()
     preview = State()
+
+class CustomConfSG(StatesGroup):
+    wait_title = State()
+    wait_desc = State()
+    wait_start_at = State()
+    wait_duration = State()
+    wait_link = State()
+    wait_phones = State()
+    confirm = State()
 
 # ================================ BOT/DP =======================================
 
@@ -2807,12 +2824,12 @@ async def send_pending_invites_to_new_client(cli: Dict[str, Any]):
 
     now = now_kyiv()
 
-    # Получаем самое раннее предстоящее событие каждого типа
+    # Получаем самое раннее предстоящее событие каждого типа (исключаем кастомные type=0)
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT DISTINCT ON (type) *
                FROM events
-               WHERE start_at >= $1
+               WHERE start_at >= $1 AND type != 0
                ORDER BY type, start_at""",
             now
         )
@@ -2917,6 +2934,48 @@ async def send_pending_invites_to_new_client(cli: Dict[str, Any]):
     if sent_count > 0:
         await log_action("new_client_invite_complete", client_id=cid,
                         details=f"Sent={sent_count}")
+
+
+async def send_custom_invites(event: Dict[str, Any], clients: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Відправка запрошень на кастомну конференцію конкретним клієнтам (без перевірок eligibility)."""
+    event_id = event.get("event_id")
+    dt = event_start_dt(event)
+    if not dt:
+        return {"sent": 0, "failed": len(clients)}
+
+    sent = 0
+    failed = 0
+
+    for cli in clients:
+        cid = cli.get("client_id")
+        tg_id = cli.get("tg_user_id")
+        if not cid or not tg_id:
+            failed += 1
+            continue
+
+        body = (await messages_get("invite.body")).format(
+            name=cli.get("full_name", "Клієнт"),
+            title=event["title"],
+            date=fmt_date(dt),
+            time=fmt_time(dt),
+            description=event.get("description", "")
+        )
+
+        try:
+            title_msg = await messages_get("invite.title")
+            await bot.send_message(chat_id=int(tg_id), text=title_msg.format(title=event["title"]))
+            await bot.send_message(chat_id=int(tg_id), text=body, reply_markup=kb_rsvp(event_id))
+            await rsvp_upsert(event_id, cid, rsvp="")
+            await log_action("invite_sent", client_id=cid, event_id=event_id, details="custom_conf")
+            sent += 1
+        except TelegramForbiddenError:
+            failed += 1
+            await log_action("invite_immediate_error", client_id=cid, event_id=event_id, details="ForbiddenError")
+        except Exception as e:
+            failed += 1
+            await log_action("invite_immediate_error", client_id=cid, event_id=event_id, details=str(e))
+
+    return {"sent": sent, "failed": failed}
 
 
 # =================== NEW HANDLERS: /info, BROADCAST, MOTIVATIONAL ==============
@@ -3331,6 +3390,180 @@ async def motivational_test_send(c: CallbackQuery):
         await c.answer(f"✅ Тестове повідомлення №{msg_num} надіслано!", show_alert=True)
     except Exception as e:
         await c.answer(f"❌ Помилка: {e}", show_alert=True)
+
+# ========================= CUSTOM CONFERENCE HANDLERS ==========================
+
+@dp.callback_query(F.data == "admin:custom")
+async def admin_custom_start(q: CallbackQuery, state: FSMContext):
+    if q.from_user.id not in ADMINS:
+        await q.answer()
+        return
+    await state.set_state(CustomConfSG.wait_title)
+    await q.message.edit_text("📞 Кастомна конференція\n\nВведіть назву конференції:")
+    await q.answer()
+
+@dp.message(CustomConfSG.wait_title)
+async def custom_wait_title(m: Message, state: FSMContext):
+    title = (m.text or "").strip()
+    if len(title) < 3:
+        await m.answer("Назва занадто коротка. Спробуйте ще раз:")
+        return
+    await state.update_data(title=title)
+    await state.set_state(CustomConfSG.wait_desc)
+    await m.answer("Введіть опис конференції:")
+
+@dp.message(CustomConfSG.wait_desc)
+async def custom_wait_desc(m: Message, state: FSMContext):
+    desc = (m.text or "").strip()
+    await state.update_data(description=desc)
+    await state.set_state(CustomConfSG.wait_start_at)
+    await m.answer("Вкажіть дату та час початку у форматі: YYYY-MM-DD HH:MM\nНапр.: 2025-10-05 15:00")
+
+@dp.message(CustomConfSG.wait_start_at)
+async def custom_wait_start_at(m: Message, state: FSMContext):
+    dt = parse_dt(m.text or "")
+    if not dt:
+        await m.answer("Невірний формат. Приклад: 2025-10-05 15:00. Спробуйте ще раз:")
+        return
+    await state.update_data(start_at=iso_dt(dt))
+    await state.set_state(CustomConfSG.wait_duration)
+    await m.answer("Вкажіть тривалість у хвилинах:")
+
+@dp.message(CustomConfSG.wait_duration)
+async def custom_wait_duration(m: Message, state: FSMContext):
+    try:
+        dur = int((m.text or "").strip())
+        if dur <= 0:
+            raise ValueError()
+    except Exception:
+        await m.answer("Введіть додатне ціле число. Спробуйте ще раз:")
+        return
+    await state.update_data(duration_min=dur)
+    await state.set_state(CustomConfSG.wait_link)
+    await m.answer("Вставте посилання на конференцію (URL):")
+
+@dp.message(CustomConfSG.wait_link)
+async def custom_wait_link(m: Message, state: FSMContext):
+    link = (m.text or "").strip()
+    await state.update_data(link=link)
+    await state.set_state(CustomConfSG.wait_phones)
+    await m.answer(
+        "Введіть номери телефонів клієнтів:\n"
+        "• Кожен номер з нового рядка або через кому\n"
+        "• Формати: 380XXXXXXXXX, 0XXXXXXXXX, +380XXXXXXXXX\n\n"
+        "Приклад:\n380671234567\n380952345678"
+    )
+
+@dp.message(CustomConfSG.wait_phones)
+async def custom_wait_phones(m: Message, state: FSMContext):
+    raw = (m.text or "").strip()
+    parts = re.split(r"[\n,;]+", raw)
+
+    found_clients = []
+    not_found_lines = []
+
+    for part in parts:
+        phone_raw = part.strip()
+        if not phone_raw:
+            continue
+        phone = normalize_phone(phone_raw)
+        if not phone:
+            not_found_lines.append(f"❌ {phone_raw} — невірний формат")
+            continue
+        client = await get_client_by_phone(phone)
+        if not client:
+            not_found_lines.append(f"❌ {phone_raw} — не знайдено в базі")
+        else:
+            # Deduplicate by client_id
+            if not any(c['client_id'] == client['client_id'] for c in found_clients):
+                found_clients.append(client)
+
+    data = await state.get_data()
+    dt = parse_dt(data['start_at'])
+    date_str = f"{fmt_date(dt)} о {fmt_time(dt)}" if dt else data['start_at']
+    total = len(found_clients) + len(not_found_lines)
+
+    text = (
+        f"👀 ПОПЕРЕДНІЙ ПЕРЕГЛЯД:\n"
+        f"─────────────────────\n"
+        f"Назва: {data['title']}\n"
+        f"Опис: {data['description']}\n"
+        f"Дата: {date_str}\n"
+        f"Тривалість: {data['duration_min']} хв\n"
+        f"Посилання: {data['link']}\n\n"
+        f"Знайдено клієнтів: {len(found_clients)} з {total}\n"
+    )
+    for cli in found_clients:
+        text += f"✅ {cli['full_name']} ({cli['phone']})\n"
+    for line in not_found_lines:
+        text += f"{line}\n"
+
+    if not found_clients:
+        text += "\n⚠️ Жодного клієнта не знайдено. Перевірте номери."
+        await m.answer(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ Ввести номери знову", callback_data="custom:confirm:edit")],
+                [InlineKeyboardButton(text="❌ Скасувати", callback_data="admin:home")],
+            ]),
+            parse_mode=None
+        )
+        return
+
+    await state.update_data(found_client_ids=[c['client_id'] for c in found_clients])
+    await state.set_state(CustomConfSG.confirm)
+    await m.answer(text, reply_markup=kb_custom_confirm(), parse_mode=None)
+
+@dp.callback_query(F.data == "custom:confirm:edit")
+async def custom_confirm_edit(q: CallbackQuery, state: FSMContext):
+    await state.set_state(CustomConfSG.wait_phones)
+    await q.message.edit_text(
+        "Введіть номери телефонів знову:\n"
+        "• Кожен номер з нового рядка або через кому\n"
+        "• Формати: 380XXXXXXXXX, 0XXXXXXXXX, +380XXXXXXXXX"
+    )
+    await q.answer()
+
+@dp.callback_query(F.data == "custom:confirm:yes", CustomConfSG.confirm)
+async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
+    if q.from_user.id not in ADMINS:
+        await q.answer()
+        return
+
+    data = await state.get_data()
+    client_ids = data.get('found_client_ids', [])
+
+    event = await create_event(
+        type_code=0,
+        title=data['title'],
+        description=data['description'],
+        start_at=data['start_at'],
+        duration_min=int(data['duration_min']),
+        link=data['link'],
+        created_by=q.from_user.id,
+    )
+
+    clients = []
+    for cid in client_ids:
+        cli = await get_client_by_id(cid)
+        if cli:
+            clients.append(cli)
+
+    await q.message.edit_text(f"⏳ Надсилаю запрошення {len(clients)} клієнтам...")
+    result = await send_custom_invites(event, clients)
+    await state.clear()
+
+    report = (
+        f"✅ Кастомну конференцію створено!\n\n"
+        f"📌 {event['title']}\n"
+        f"🗓 {event['start_at']}\n\n"
+        f"📊 Результати розсилки:\n"
+        f"✅ Надіслано: {result['sent']}\n"
+        f"❌ Помилка доставки: {result['failed']}"
+    )
+    await q.message.edit_text(report, reply_markup=kb_admin_main())
+    await q.answer()
+
 
 # =============================== SCHEDULER TICK ================================
 
