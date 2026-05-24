@@ -3543,34 +3543,42 @@ async def custom_confirm_yes(c: CallbackQuery, state: FSMContext):
         f"⏳ Надсилаю запрошення {len(client_ids)} клієнтам..."
     )
 
-    event = await create_event(
-        type_code=0,
-        title=data['title'],
-        description=data['description'],
-        start_at=data['start_at'],
-        duration_min=int(data['duration_min']),
-        link=data['link'],
-        created_by=c.from_user.id,
-    )
+    try:
+        event = await create_event(
+            type_code=0,
+            title=data['title'],
+            description=data['description'],
+            start_at=data['start_at'],
+            duration_min=int(data['duration_min']),
+            link=data['link'],
+            created_by=c.from_user.id,
+        )
 
-    clients = []
-    for cid in client_ids:
-        cli = await get_client_by_id(cid)
-        if cli:
-            clients.append(cli)
+        clients = []
+        for cid in client_ids:
+            cli = await get_client_by_id(cid)
+            if cli:
+                clients.append(cli)
 
-    result = await send_custom_invites(event, clients)
-    await state.clear()
+        result = await send_custom_invites(event, clients)
+        await state.clear()
 
-    report = (
-        f"✅ Кастомну конференцію створено!\n\n"
-        f"📌 {event['title']}\n"
-        f"🗓 {event['start_at']}\n\n"
-        f"📊 Результати розсилки:\n"
-        f"✅ Надіслано: {result['sent']}\n"
-        f"❌ Помилка доставки: {result['failed']}"
-    )
-    await progress_msg.edit_text(report, reply_markup=kb_admin_main())
+        report = (
+            f"✅ Кастомну конференцію створено!\n\n"
+            f"📌 {event['title']}\n"
+            f"🗓 {event['start_at']}\n\n"
+            f"📊 Результати розсилки:\n"
+            f"✅ Надіслано: {result['sent']}\n"
+            f"❌ Помилка доставки: {result['failed']}"
+        )
+        await progress_msg.edit_text(report, reply_markup=kb_admin_main())
+
+    except Exception as e:
+        await state.clear()
+        await progress_msg.edit_text(
+            f"❌ Помилка: {e}",
+            reply_markup=kb_admin_main()
+        )
 
 
 # =============================== SCHEDULER TICK ================================
@@ -3713,6 +3721,12 @@ async def scheduler_tick():
 
 async def on_startup():
     await init_db()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO event_types (type_code, title, description, active)
+               VALUES (0, 'Кастомна конференція', 'Кастомна конференція', FALSE)
+               ON CONFLICT (type_code) DO NOTHING"""
+        )
     scheduler.add_job(scheduler_tick, "interval", seconds=60, id="tick", replace_existing=True)
     scheduler.start()
 
