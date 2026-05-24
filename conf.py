@@ -3526,15 +3526,21 @@ async def custom_confirm_edit(q: CallbackQuery, state: FSMContext):
         "• Формати: 380XXXXXXXXX, 0XXXXXXXXX, +380XXXXXXXXX"
     )
 
-@dp.callback_query(F.data == "custom:confirm:yes", CustomConfSG.confirm)
+@dp.callback_query(F.data == "custom:confirm:yes")
 async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
     await q.answer()
-
-    # Якщо після рестарту бота ADMINS очистився — відновлюємо і продовжуємо
     ADMINS.add(q.from_user.id)
 
     data = await state.get_data()
-    client_ids = data.get('found_client_ids', [])
+    client_ids = data.get('found_client_ids')
+
+    if not client_ids or 'title' not in data:
+        await q.message.edit_text(
+            "❌ Сесія застаріла або дані втрачено. Почніть знову.",
+            reply_markup=kb_admin_main()
+        )
+        await state.clear()
+        return
 
     try:
         event = await create_event(
