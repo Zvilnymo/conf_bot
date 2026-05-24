@@ -3527,38 +3527,31 @@ async def custom_confirm_edit(q: CallbackQuery, state: FSMContext):
     )
 
 @dp.callback_query(F.data == "custom:confirm:yes")
-async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
-    await q.answer()
-    ADMINS.add(q.from_user.id)
+async def custom_confirm_yes(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id not in ADMINS:
+        await c.answer("❌ Доступ заборонено")
+        return
 
     data = await state.get_data()
-    client_ids = data.get('found_client_ids')
+    client_ids = data.get('found_client_ids', [])
 
     if not client_ids or 'title' not in data:
-        await q.message.edit_text(
-            "❌ Сесія застаріла або дані втрачено. Почніть знову.",
-            reply_markup=kb_admin_main()
-        )
-        await state.clear()
+        await c.answer("❌ Помилка: дані не знайдено. Почніть знову.")
         return
 
-    try:
-        event = await create_event(
-            type_code=0,
-            title=data['title'],
-            description=data['description'],
-            start_at=data['start_at'],
-            duration_min=int(data['duration_min']),
-            link=data['link'],
-            created_by=q.from_user.id,
-        )
-    except Exception as e:
-        await q.message.edit_text(
-            f"❌ Помилка створення події: {e}\n\nСпробуйте ще раз.",
-            reply_markup=kb_admin_main()
-        )
-        await state.clear()
-        return
+    progress_msg = await c.message.edit_text(
+        f"⏳ Надсилаю запрошення {len(client_ids)} клієнтам..."
+    )
+
+    event = await create_event(
+        type_code=0,
+        title=data['title'],
+        description=data['description'],
+        start_at=data['start_at'],
+        duration_min=int(data['duration_min']),
+        link=data['link'],
+        created_by=c.from_user.id,
+    )
 
     clients = []
     for cid in client_ids:
@@ -3566,18 +3559,7 @@ async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
         if cli:
             clients.append(cli)
 
-    await q.message.edit_text(f"⏳ Надсилаю запрошення {len(clients)} клієнтам...")
-
-    try:
-        result = await send_custom_invites(event, clients)
-    except Exception as e:
-        await q.message.edit_text(
-            f"❌ Помилка розсилки: {e}",
-            reply_markup=kb_admin_main()
-        )
-        await state.clear()
-        return
-
+    result = await send_custom_invites(event, clients)
     await state.clear()
 
     report = (
@@ -3588,7 +3570,7 @@ async def custom_confirm_yes(q: CallbackQuery, state: FSMContext):
         f"✅ Надіслано: {result['sent']}\n"
         f"❌ Помилка доставки: {result['failed']}"
     )
-    await q.message.edit_text(report, reply_markup=kb_admin_main())
+    await progress_msg.edit_text(report, reply_markup=kb_admin_main())
 
 
 # =============================== SCHEDULER TICK ================================
